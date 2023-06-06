@@ -2,6 +2,8 @@
 //! - Have lifetimed scheduler (e.g. non static functions)
 //! - Measure jitter / long running functions to make predictions?
 //! - Counted scheduler (e.g. run 5 times then remove)
+//!
+//! - Multiple scheduler implementations (e.g. Instant, tick/interval based)
 
 use std::{
     collections::BinaryHeap,
@@ -45,21 +47,30 @@ impl Add<Duration> for Stbi {
     }
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Schedule {
     Once(Option<Duration>),
     Every(Duration),
+    Counted { count: usize, interval: Duration },
 }
 
 impl Schedule {
-    pub fn is_once(&self) -> bool {
-        matches!(self, Self::Once(_))
+    pub fn reschedule(mut self) -> Option<Self> {
+        match &mut self {
+            Schedule::Every(_) => Some(self),
+            Schedule::Counted { count, .. } if *count > 1 => {
+                *count -= 1;
+                Some(self)
+            }
+            _ => None,
+        }
     }
 
     pub fn as_duration(&self) -> &Duration {
         match self {
             Schedule::Once(duration) => duration.as_ref().unwrap_or(&Duration::ZERO),
             Schedule::Every(d) => d,
+            Self::Counted { interval, .. } => interval,
         }
     }
 
@@ -85,44 +96,18 @@ pub struct Task {
     f: TaskFunction,
 }
 
-impl Task {
-    pub fn once<F>(f: F) -> Self
-    where
-        F: 'static + FnMut(),
-    {
-        Schedule::Once(None).with(f)
-    }
-
-    pub fn once_boxed(f: TaskFunction) -> Self {
-        Schedule::Once(None).with_boxed(f)
-    }
-
-    pub fn offset<F>(duration: Duration, f: F) -> Self
-    where
-        F: 'static + FnMut(),
-    {
-        Schedule::Once(Some(duration)).with(f)
-    }
-
-    pub fn offset_boxed<F>(duration: Duration, f: TaskFunction) -> Self {
-        Schedule::Once(Some(duration)).with_boxed(f)
-    }
-
-    pub fn every<F>(duration: Duration, f: F) -> Self
-    where
-        F: 'static + FnMut(),
-    {
-        Schedule::Every(duration).with(f)
-    }
-
-    pub fn every_boxed(duration: Duration, f: TaskFunction) -> Self {
-        Schedule::Every(duration).with_boxed(f)
-    }
-}
-
 pub struct ScheduledTask {
     at: Stbi,
     task: Task,
+}
+
+impl ScheduledTask {
+    pub fn reschedule(mut self, stbi: Stbi) -> Option<Self> {
+        let schedule = self.task.schedule.reschedule()?;
+        self.task.schedule = schedule;
+        self.at = stbi + *self.task.schedule.as_duration();
+        Some(self)
+    }
 }
 
 impl PartialEq for ScheduledTask {
@@ -181,8 +166,7 @@ impl Scheduler {
                 (task.task.f)();
 
                 // Push next execution
-                if !task.task.schedule.is_once() {
-                    task.at = now + *task.task.schedule.as_duration();
+                if let Some(task) = task.reschedule(now) {
                     self.schedule.push(task);
                 }
             } else {
@@ -213,8 +197,15 @@ mod tests {
             Schedule::Every(Duration::from_millis(125)).with(|| {
                 println!("I am annoying too");
             }),
-            Schedule::Every(Duration::from_millis(66)).with(|| {
+            Schedule::Every(Duration::from_millis(61)).with(|| {
                 println!("I am annoying thrice");
+            }),
+            Schedule::Counted {
+                count: 10,
+                interval: Duration::from_millis(13),
+            }
+            .with(|| {
+                println!("I will only be annoying 10 times");
             }),
         ];
 
