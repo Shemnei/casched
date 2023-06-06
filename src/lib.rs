@@ -1,13 +1,11 @@
 //! TODO
 //! - Have lifetimed scheduler (e.g. non static functions)
 //! - Measure jitter / long running functions to make predictions?
-//! - Counted scheduler (e.g. run 5 times then remove)
 //!
 //! - Multiple scheduler implementations (e.g. Instant, tick/interval based)
 
 use std::{
     collections::BinaryHeap,
-    matches,
     ops::Add,
     time::{Duration, Instant},
 };
@@ -47,30 +45,38 @@ impl Add<Duration> for Stbi {
     }
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Schedule {
     Once(Option<Duration>),
     Every(Duration),
-    Counted { count: usize, interval: Duration },
+    Counted {
+        interval: Duration,
+        count: usize,
+    },
+    Checked {
+        interval: Duration,
+        check: Box<dyn FnMut() -> bool>,
+    },
 }
 
 impl Schedule {
     pub fn reschedule(mut self) -> Option<Self> {
         match &mut self {
-            Schedule::Every(_) => Some(self),
-            Schedule::Counted { count, .. } if *count > 1 => {
+            Self::Every(_) => Some(self),
+            Self::Counted { count, .. } if *count > 1 => {
                 *count -= 1;
                 Some(self)
             }
+            Self::Checked { check, .. } => check().then_some(self),
             _ => None,
         }
     }
 
     pub fn as_duration(&self) -> &Duration {
         match self {
-            Schedule::Once(duration) => duration.as_ref().unwrap_or(&Duration::ZERO),
-            Schedule::Every(d) => d,
+            Self::Once(duration) => duration.as_ref().unwrap_or(&Duration::ZERO),
+            Self::Every(d) => d,
             Self::Counted { interval, .. } => interval,
+            Self::Checked { interval, .. } => interval,
         }
     }
 
@@ -201,11 +207,18 @@ mod tests {
                 println!("I am annoying thrice");
             }),
             Schedule::Counted {
-                count: 10,
                 interval: Duration::from_millis(13),
+                count: 10,
             }
             .with(|| {
                 println!("I will only be annoying 10 times");
+            }),
+            Schedule::Checked {
+                interval: Duration::from_secs(1),
+                check: Box::new(|| std::path::Path::new("Cargo.toml").exists()),
+            }
+            .with(|| {
+                println!("I will only be annoying if Cargo.toml exists in the pwd");
             }),
         ];
 
